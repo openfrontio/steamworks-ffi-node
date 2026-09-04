@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc && npm run build:native",
     "build:native": "cd native && node-gyp rebuild",
+    "prepare": "tsc",
     "postinstall": "node postinstall.js",
     "verify-sdk": "node verify-sdk-setup.js",
     "test:core:js": "node tests/js/test-core-api.js",
