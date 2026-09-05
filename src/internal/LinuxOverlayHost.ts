@@ -331,6 +331,22 @@ export class LinuxOverlayHost {
       this.child = null;
     });
 
+    // Both of these must exist before anything is written, and neither is
+    // optional: an 'error' event with no listener is re-raised by Node as an
+    // uncaught exception, which in a host application is a crash dialog.
+    //
+    // A dropped command is expected here -- the overlay is optional and the
+    // host may die at any point -- so the correct handling is to note it and
+    // carry on. The try/catch in send() cannot do this job: EPIPE on a pipe is
+    // delivered asynchronously as an 'error' event, long after write()
+    // returned, so there is nothing for a synchronous catch to catch.
+    this.child.on("error", (err) => {
+      SteamLogger.debug(`[Steam Overlay] Overlay host process error: ${err}`);
+    });
+    this.child.stdin?.on("error", (err) => {
+      SteamLogger.debug(`[Steam Overlay] Overlay host pipe closed: ${err}`);
+    });
+
     this.send("create", options);
 
     const deadline = Date.now() + timeoutMs;
@@ -380,7 +396,16 @@ export class LinuxOverlayHost {
     }
   }
 
-  /** Fire-and-forget command. Nothing after `create` needs a reply. */
+  /**
+   * Fire-and-forget command. Nothing after `create` needs a reply.
+   *
+   * Note what the guards below do and do not cover. `stdin.destroyed` is still
+   * false for a child that died moments ago, because the stream is told on the
+   * event loop and the startup handshake deliberately blocks it -- the same
+   * trap as the liveness check. And the try/catch only catches synchronous
+   * failures, which an EPIPE is not. The 'error' listener attached at spawn is
+   * what actually makes a write to a dead host safe.
+   */
   send(op: string, payload?: object): void {
     if (!this.child?.stdin || this.child.stdin.destroyed) return;
     try {
@@ -392,7 +417,11 @@ export class LinuxOverlayHost {
 
   stop(): void {
     if (this.child) {
-      this.send("destroy");
+      // Only ask politely if there is anyone left to ask. stop() is also the
+      // failure path out of start(), where the child is already dead and this
+      // write is what raised EPIPE; the kill below covers a child that is
+      // merely unresponsive.
+      if (this.childAlive()) this.send("destroy");
       // Give it a moment to unmap cleanly, then make sure it is gone: a stranded
       // always-on-top window would be far worse than a missing overlay.
       const child = this.child;
