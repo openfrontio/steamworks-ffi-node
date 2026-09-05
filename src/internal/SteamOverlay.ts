@@ -1,4 +1,5 @@
 import { SteamLogger } from "./SteamLogger";
+import { createHostedNativeModule } from "./LinuxOverlayHost";
 
 /**
  * Steam Overlay Integration for Electron
@@ -53,6 +54,8 @@ function readWindowHandle(browserWindow: any): bigint | undefined {
 
 export class SteamOverlay {
   private nativeModule: any = null;
+  /** The real addon, kept so the Linux host adapter is never wrapped twice. */
+  private inProcessModule: any = null;
   private isInitialized: boolean = false;
   private overlayWindow: any = null;
   /** Whether the overlay window is genuinely transparent -- see isTransparent(). */
@@ -93,6 +96,7 @@ export class SteamOverlay {
       }
 
       if (loaded && this.nativeModule) {
+        this.inProcessModule = this.nativeModule;
         this.isInitialized = true;
         // Sync debug mode with native module
         this.nativeModule.setDebugMode(SteamLogger.isDebugEnabled());
@@ -234,10 +238,37 @@ export class SteamOverlay {
         vsync: options?.vsync !== false,
         transparent: options?.transparent === true,
         ownerHwnd: ownerHwnd,
+        // Linux: the host process needs Electron's XID up front, so that it can
+        // forward input straight to it over X11 rather than through this process.
+        electronXid: process.platform === "linux"
+          ? Number(readWindowHandle(browserWindow) ?? 0) || undefined
+          : undefined,
       };
+
+      // On Linux, Steam's overlay only draws in a process that had
+      // gameoverlayrenderer.so LD_PRELOADed at exec, and Electron cannot be that
+      // process: the preload reaches Chromium's zygotes and the GPU process does
+      // not survive it. Host the window in a small preloaded child instead.
+      // See LinuxOverlayHost for why no in-process approach can work.
+      if (process.platform === "linux" && options?.transparent === true) {
+        this.nativeModule = createHostedNativeModule(this.inProcessModule);
+      }
 
       this.overlayWindow =
         this.nativeModule.createOverlayWindow(overlayWindowOptions);
+
+      if (!this.overlayWindow && this.nativeModule !== this.inProcessModule) {
+        // No Steam installation found, or the host failed to come up. Fall back
+        // to an in-process window: Steam will not draw over it, but that is no
+        // worse than the behaviour before hosting existed.
+        SteamLogger.debug(
+          "[Steam Overlay] Overlay host unavailable; falling back to an " +
+            "in-process window. The Steam overlay will not draw on Linux.",
+        );
+        this.nativeModule = this.inProcessModule;
+        this.overlayWindow =
+          this.nativeModule.createOverlayWindow(overlayWindowOptions);
+      }
 
       if (!this.overlayWindow) {
         SteamLogger.error("[Steam Overlay] Failed to create overlay window");
@@ -536,6 +567,10 @@ export class SteamOverlay {
         );
       }
     }
+
+    // Drop the host adapter now the host process is gone, so a later re-attach
+    // starts from the real addon instead of wrapping the adapter again.
+    if (this.inProcessModule) this.nativeModule = this.inProcessModule;
   }
 
   /**
