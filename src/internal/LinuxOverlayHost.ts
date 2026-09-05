@@ -448,10 +448,11 @@ export function createHostedNativeModule(fallback: any): any {
         fps: options.fps,
         vsync: options.vsync,
         electronXid: options.electronXid,
-        // Carried into the create so the host starts with it. Configuring debug
-        // and then attaching is the natural order, and the order this library's
-        // own documentation uses, so it must work.
-        debug: SteamLogger.isDebugEnabled(),
+        // Decided by the caller, not read from SteamLogger here: setDebugMode()
+        // and SteamLogger are independent switches, and consulting only the
+        // latter meant an integrator calling setDebugMode(true) -- the API the
+        // docs use -- got a silent host whatever the call order.
+        debug: options.debug === true,
       });
       return started ? HOSTED_WINDOW : null;
     },
