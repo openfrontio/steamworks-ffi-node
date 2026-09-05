@@ -92,9 +92,17 @@ export function findOverlayLibrary(): string | undefined {
   const inherited = process.env["LD_PRELOAD"];
   if (inherited) {
     // Steam's value has a leading empty entry; the filters below drop it.
+    // Readability is checked rather than assumed: a stale inherited value would
+    // otherwise go straight into the child's LD_PRELOAD, where the loader
+    // silently ignores a bad path and the overlay simply never appears.
     const match = inherited
       .split(":")
-      .find((entry) => entry.includes("gameoverlayrenderer.so") && entry.includes(dir));
+      .find(
+        (entry) =>
+          entry.includes("gameoverlayrenderer.so") &&
+          entry.includes(dir) &&
+          isReadable(entry),
+      );
     if (match) return match;
   }
 
@@ -103,14 +111,18 @@ export function findOverlayLibrary(): string | undefined {
 
   for (const root of STEAM_ROOTS) {
     const candidate = path.join(home, root, dir, "gameoverlayrenderer.so");
-    try {
-      fs.accessSync(candidate, fs.constants.R_OK);
-      return candidate;
-    } catch {
-      /* try the next root */
-    }
+    if (isReadable(candidate)) return candidate;
   }
   return undefined;
+}
+
+function isReadable(p: string): boolean {
+  try {
+    fs.accessSync(p, fs.constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Sleep without yielding to the event loop, so a handshake can be awaited synchronously. */
@@ -200,17 +212,30 @@ export class LinuxOverlayHost {
   /**
    * Whether the child is still alive, asked of the kernel rather than of Node.
    *
-   * The 'exit' event cannot answer this during the startup handshake: that event
-   * is delivered on the event loop, and the handshake deliberately blocks it. A
-   * signal-0 kill is the only liveness check available while we are not yielding.
+   * Everything Node offers here depends on the event loop, which the handshake
+   * deliberately blocks, so none of it works:
+   *
+   *   - `child.exitCode` is set from the 'exit' event, delivered on the loop.
+   *   - `process.kill(pid, 0)` succeeds on a **zombie**, and a dead child stays
+   *     a zombie precisely because reaping it needs SIGCHLD handled on the loop.
+   *     Measured: it reported ALIVE for a full 3s deadline against a child that
+   *     had already exited, with /proc showing state Z throughout.
+   *
+   * /proc is the only source that answers synchronously and truthfully. Linux
+   * only, but so is this entire file.
    */
   private childAlive(): boolean {
     const pid = this.child?.pid;
     if (!pid) return false;
     try {
-      process.kill(pid, 0);
-      return true;
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      // Field 3 is the state character. Skip past the last ')' rather than
+      // splitting from the start: field 2 is the executable name, which may
+      // itself contain spaces and parentheses.
+      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+      return state !== "Z" && state !== "X";
     } catch {
+      // No /proc entry: already reaped, or never started.
       return false;
     }
   }

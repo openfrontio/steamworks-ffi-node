@@ -254,6 +254,29 @@ The Linux implementation uses OpenGL 3.3 with X11:
 - X11 display server (Wayland not yet supported)
 - OpenGL 3.3+ capable driver
 
+#### The overlay window runs in its own process
+
+With `transparent: true`, the overlay window is created in a small child
+process rather than in the Electron main process. This is not an optimisation:
+Steam's Linux overlay only draws in a process that had `gameoverlayrenderer.so`
+`LD_PRELOAD`ed at `exec`, and preloading Electron itself breaks Chromium —
+`LD_PRELOAD` is inherited by the zygotes, which are forked before any JavaScript
+runs, and the GPU process does not survive it.
+
+The child is `process.execPath` re-invoked with `ELECTRON_RUN_AS_NODE=1`, so no
+extra binary is shipped, and Chromium never sees the library. It is started and
+torn down with the overlay; nothing is required of the consuming application.
+
+Attaching blocks the main thread until the child reports its window —
+approximately 260 ms in practice, most of which is the child starting and
+creating its GL context. It is bounded, happens once, and is what makes
+`isTransparent()` meaningful the moment `addElectronSteamOverlay()` returns.
+
+**Set `SteamGameId` if you can.** The overlay attaches and responds to
+Shift+Tab without it, but Steam logs `Got gameid on commandline: 0` and draws
+only a partial overlay — the friends panel appears, the Game Overview and
+toolbar do not. `LD_PRELOAD` is the only variable actually required.
+
 ## Electron Packaging
 
 > ⚠️ The native overlay module (`steam-overlay.node`) **must** be outside the `.asar` archive — `require()` cannot load native addons from inside `.asar`. The recommended approach for games is to unpack the entire library with a single rule.
