@@ -713,6 +713,20 @@ npx steamworks-fetch-universal-koffi
 - No file creation required - library uses environment variables automatically
 - Optional: You can manually create `steam_appid.txt` if needed for other Steam tools
 
+### Building the native overlay from source on Linux
+
+Prebuilt binaries are shipped, so this is only needed if you are building the
+addon yourself. `node-gyp` compiles `native/linux-overlay.cpp` against X11 and
+GL headers that are not installed by default on a bare distribution:
+
+```bash
+sudo apt-get install -y libx11-dev libxext-dev libxfixes-dev libgl1-mesa-dev
+```
+
+Without them the build fails with `fatal error: X11/extensions/shape.h: No such
+file or directory` (or `Xfixes.h`), which is not obviously a missing-package
+problem the first time you hit it.
+
 ### Platform Support
 
 - ✅ **Windows**: steam_api64.dll / steam_api.dll

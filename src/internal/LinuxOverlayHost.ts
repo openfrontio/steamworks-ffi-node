@@ -71,21 +71,37 @@ interface Handshake {
 }
 
 /**
- * Steam's overlay library for this process's architecture.
+ * Steam's overlay library, for this process's architecture only.
  *
- * Prefers whatever Steam itself set, so we inherit its choice rather than
- * second-guessing it — note Steam sets *both* architectures and lets the loader
- * reject the wrong one, and that the "64" is in the directory name, not the
- * filename.
+ * Steam itself sets LD_PRELOAD to *both* architectures and lets the loader
+ * reject the wrong one, which is harmless but prints
+ *
+ *   ERROR: ld.so: object '.../ubuntu12_32/gameoverlayrenderer.so' from
+ *   LD_PRELOAD cannot be preloaded (wrong ELF class: ELFCLASS32): ignored.
+ *
+ * three times on a 64-bit binary. Passing that through to the host would put
+ * the same noise in the consuming application's own logs, so pick the single
+ * matching entry instead.
+ *
+ * Prefer Steam's own paths when they were inherited, since that is where Steam
+ * is actually installed; fall back to searching, because the install location
+ * is not fixed. Note the "64" is in the directory name, not the filename.
  */
 export function findOverlayLibrary(): string | undefined {
+  const dir = process.arch === "ia32" ? "ubuntu12_32" : "ubuntu12_64";
+
   const inherited = process.env["LD_PRELOAD"];
-  if (inherited && inherited.includes("gameoverlayrenderer.so")) return inherited;
+  if (inherited) {
+    // Steam's value has a leading empty entry; the filters below drop it.
+    const match = inherited
+      .split(":")
+      .find((entry) => entry.includes("gameoverlayrenderer.so") && entry.includes(dir));
+    if (match) return match;
+  }
 
   const home = os.homedir();
   if (!home) return undefined;
 
-  const dir = process.arch === "ia32" ? "ubuntu12_32" : "ubuntu12_64";
   for (const root of STEAM_ROOTS) {
     const candidate = path.join(home, root, dir, "gameoverlayrenderer.so");
     try {
