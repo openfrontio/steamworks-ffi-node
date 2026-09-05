@@ -10,10 +10,6 @@
 #   ./overlay-battery.sh --no-build      # reuse an existing ./ffi-work build
 #   ./overlay-battery.sh --branch NAME   # test a different branch
 #
-# Grab it on a fresh machine:
-#   curl -fsSLO https://raw.githubusercontent.com/openfrontio/steamworks-ffi-node/josh/linux-overlay-integration/scripts/overlay-battery.sh
-#   chmod +x overlay-battery.sh && ./overlay-battery.sh
-#
 # Requires: Steam running and logged in, a graphical session, and NO Steam game
 # running anywhere on the account (the script refuses otherwise).
 # ---------------------------------------------------------------------------
@@ -58,13 +54,15 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # ---------------------------------------------------------------------------
 hdr "PRECONDITIONS"
 
+# Collect EVERY missing prerequisite before exiting. Bailing at the first
+# category means one round-trip per category: you fix the tools, re-run, and
+# only then discover the headers. Report the whole list once.
+PREREQ_FATAL=0
 MISSING=""
 for t in node npm gcc make python3 git; do have "$t" || MISSING="$MISSING $t"; done
 if [ -n "$MISSING" ]; then
   warn "missing required tools:$MISSING"
-  say  "  install (Debian/Ubuntu): sudo apt-get install -y nodejs npm build-essential python3 git"
-  say  "  install (Arch):          sudo pacman -S --needed nodejs npm base-devel python git"
-  exit 1
+  PREREQ_FATAL=1
 fi
 
 OPTIONAL_MISSING=""
@@ -84,8 +82,20 @@ for h in X11/Xlib.h X11/extensions/shape.h X11/extensions/Xfixes.h X11/extension
 done
 if [ -n "$HDRS_MISSING" ] && [ "$DO_BUILD" = 1 ]; then
   warn "missing build headers:$HDRS_MISSING"
-  say  "  Debian/Ubuntu: sudo apt-get install -y libx11-dev libxext-dev libxfixes-dev libxcomposite-dev libgl1-mesa-dev"
-  say  "  Arch:          sudo pacman -S --needed libx11 libxext libxfixes libxcomposite mesa"
+  PREREQ_FATAL=1
+fi
+
+if [ "$PREREQ_FATAL" = 1 ]; then
+  say ""
+  say "  INSTALL EVERYTHING MISSING IN ONE GO:"
+  say "    Debian/Ubuntu/Mint:"
+  say "      sudo apt-get install -y nodejs npm build-essential python3 git \\"
+  say "        libx11-dev libxext-dev libxfixes-dev libxcomposite-dev libgl1-mesa-dev \\"
+  say "        mesa-utils vulkan-tools xdotool imagemagick x11-utils pciutils"
+  say "    Arch:"
+  say "      sudo pacman -S --needed nodejs npm base-devel python git \\"
+  say "        libx11 libxext libxfixes libxcomposite mesa \\"
+  say "        mesa-utils vulkan-tools xdotool imagemagick xorg-xwininfo xorg-xprop pciutils"
   exit 1
 fi
 
@@ -223,6 +233,55 @@ if [ ! -x "${ELECTRON:-}" ]; then
   exit 1
 fi
 say "  electron: $("$ELECTRON" --version 2>/dev/null | head -1)  ($ELECTRON)"
+
+# Electron's SUID sandbox helper must be root:root mode 4755, but npm installs
+# it owned by the invoking user. On distros that permit unprivileged user
+# namespaces (Pop!_OS) Electron uses the namespace sandbox and never touches it.
+# Ubuntu 24.04 and derivatives restrict unprivileged userns via AppArmor, so
+# Electron falls back to the SUID helper, finds it misconfigured, and aborts
+# before running a line of the app:
+#   FATAL:setuid_sandbox_host.cc(163) The SUID sandbox helper binary was found,
+#   but is not configured correctly.
+# Fix it rather than passing --no-sandbox: that flag changes Chromium's process
+# model, and the process model is precisely what this battery measures.
+SANDBOX="$(dirname "$ELECTRON")/chrome-sandbox"
+if [ -f "$SANDBOX" ]; then
+  SB_OWNER=$(stat -c '%U' "$SANDBOX" 2>/dev/null)
+  SB_MODE=$(stat -c '%a' "$SANDBOX" 2>/dev/null)
+  if [ "$SB_OWNER" = "root" ] && [ "$SB_MODE" = "4755" ]; then
+    say "  chrome-sandbox: ok (root 4755)"
+  elif [ "$(id -u)" = 0 ]; then
+    chown root:root "$SANDBOX" && chmod 4755 "$SANDBOX"
+    say "  chrome-sandbox: was $SB_OWNER $SB_MODE — fixed to root 4755"
+  elif have sudo; then
+    # Prompt if it has to. Fixing this by hand does NOT stick: `npm install` on
+    # the next run re-extracts Electron and resets the file, so telling the user
+    # to fix it and exit would loop forever. It has to be fixed here, after the
+    # last thing that can rewrite it.
+    say "  chrome-sandbox: was $SB_OWNER $SB_MODE — needs root 4755, asking sudo"
+    if sudo chown root:root "$SANDBOX" && sudo chmod 4755 "$SANDBOX"; then
+      say "  chrome-sandbox: fixed to $(stat -c '%U %a' "$SANDBOX")"
+    else
+      warn "could not fix chrome-sandbox. Electron will abort before starting"
+      warn "on Ubuntu 24.04 and derivatives. Re-run with sudo available, or:"
+      say  "    sudo chown root:root $SANDBOX && sudo chmod 4755 $SANDBOX"
+      warn "note: fixing it by hand is undone by the next run's npm install,"
+      warn "so run the battery in a shell where sudo works instead."
+      exit 1
+    fi
+  else
+    warn "chrome-sandbox is $SB_OWNER mode $SB_MODE, must be root 4755, and"
+    warn "sudo is unavailable. Electron cannot start on this distro."
+    exit 1
+  fi
+  # Confirm it actually took -- a nosuid mount would silently defeat the mode.
+  MNT=$(findmnt -no TARGET,OPTIONS --target "$SANDBOX" 2>/dev/null | head -1)
+  case "$MNT" in
+    *nosuid*) warn "the filesystem holding Electron is mounted NOSUID ($MNT)."
+              warn "The setuid bit is ignored there, so this cannot work."
+              warn "Move the work dir with --work to a suid-permitting filesystem." ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Harness app. Logs synchronously so nothing is lost if the process is killed.
@@ -372,6 +431,12 @@ assert_case() {
   loaded=$(grep -c 'electron pid:' "$APP/harness.log" 2>/dev/null)
   if [ "${loaded:-0}" = 0 ]; then
     warn "app never reached whenReady — results for $label are VOID, not a pass"
+    if grep -q 'setuid_sandbox_host' "$out" 2>/dev/null; then
+      warn "CAUSE: Electron's SUID sandbox helper is misconfigured. This is an"
+      warn "environment problem, NOT an overlay result. Fix and re-run:"
+      say  "    sudo chown root:root $(dirname "$ELECTRON")/chrome-sandbox"
+      say  "    sudo chmod 4755 $(dirname "$ELECTRON")/chrome-sandbox"
+    fi
     head -5 "$out" 2>/dev/null | sed 's/^/    /' | tee -a "$REPORT"
   else
     say "  app loaded      : yes"
