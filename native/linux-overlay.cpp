@@ -1,5 +1,5 @@
 // Linux OpenGL (GLX) Overlay for Steam Integration
-// Uses glXSwapBuffers hook in gameoverlayrenderer64.so to enable Steam overlay (Shift+Tab).
+// Uses glXSwapBuffers hook in gameoverlayrenderer.so to enable Steam overlay (Shift+Tab).
 
 #if defined(__linux__) && !defined(__ANDROID__)
 
@@ -45,7 +45,106 @@ static bool g_debugMode = false;
 typedef GLXContext (*glXCreateContextAttribsARBProc)(Display*, GLXFBConfig, GLXContext, Bool, const int*);
 typedef void (*glXSwapIntervalEXTProc)(Display*, GLXDrawable, int);
 
-// Linux OpenGL/GLX Overlay Window — glXSwapBuffers is hooked by gameoverlayrenderer64.so
+// Whether Steam's overlay interposer is in our glXSwapBuffers call path, which
+// is a different question from whether its library is loaded.
+//
+// The overlay works by LD_PRELOADing gameoverlayrenderer.so, which places it at
+// the FRONT of the global symbol scope so glXSwapBuffers resolves to Steam's
+// copy instead of the driver's. A library that is merely *mapped* -- dlopen'd
+// after startup, say -- is appended to that scope rather than inserted at the
+// front, so the symbol still binds to the driver and the overlay never draws,
+// even though the library is plainly there in /proc/self/maps.
+//
+// So presence and interposition have to be reported separately. dladdr() on the
+// globally-bound symbol answers the second one: it names the object that this
+// addon's own glXSwapBuffers call resolves through, since that call goes through
+// the ordinary global scope.
+//
+// Note what it does *not* tell you: it reports the global binding, not the
+// target of an arbitrary call site. Code that deliberately bypasses the loader,
+// by calling a pointer from dlsym(handle, "glXSwapBuffers"), would enter Steam's
+// copy while this still reported libGL. Nothing here does that -- and such a
+// call would not draw anyway, because Steam's interposer forwards through
+// dlsym(RTLD_NEXT, ...), which resolves to nothing when the library is loaded
+// last -- so "will the overlay draw" is still answered correctly either way.
+enum class OverlayHookState { Active, MappedNotInterposing, NotPresent };
+
+static const char* overlayHookStateName(OverlayHookState s) {
+    switch (s) {
+        case OverlayHookState::Active:               return "active";
+        case OverlayHookState::MappedNotInterposing: return "mapped-not-interposing";
+        default:                                     return "not-present";
+    }
+}
+
+// Is Steam's overlay library mapped into this process at all?
+//
+// Matching "gameoverlayrenderer64" here never worked: that is the Windows
+// filename. On Linux the library is <steam>/ubuntu12_64/gameoverlayrenderer.so
+// -- the "64" is in the directory, not the filename -- so the old substring
+// never matched and the "hook inactive" warning fired unconditionally.
+static bool overlayLibraryMapped(std::string* mappingOut) {
+    FILE* maps = fopen("/proc/self/maps", "r");
+    if (!maps) return false;
+
+    char line[512];
+    bool found = false;
+    while (fgets(line, sizeof(line), maps)) {
+        if (strstr(line, "gameoverlayrenderer")) {
+            char* nl = strchr(line, '\n');
+            if (nl) *nl = 0;
+            if (mappingOut) *mappingOut = line;
+            found = true;
+            break;
+        }
+    }
+    fclose(maps);
+    return found;
+}
+
+static OverlayHookState queryOverlayHookState(std::string* mappingOut, std::string* ownerOut) {
+    std::string mapping;
+    const bool mapped = overlayLibraryMapped(&mapping);
+    if (mappingOut) *mappingOut = mapping;
+
+    // What a glXSwapBuffers call resolves to right now, in this process.
+    void* resolved = dlsym(RTLD_DEFAULT, "glXSwapBuffers");
+    Dl_info info;
+    const char* owner = nullptr;
+    if (resolved && dladdr(resolved, &info) && info.dli_fname) owner = info.dli_fname;
+    if (ownerOut) *ownerOut = owner ? owner : "";
+
+    if (owner && strstr(owner, "gameoverlayrenderer")) return OverlayHookState::Active;
+    return mapped ? OverlayHookState::MappedNotInterposing : OverlayHookState::NotPresent;
+}
+
+static OverlayHookState reportOverlayHookState() {
+    std::string mapping, owner;
+    const OverlayHookState state = queryOverlayHookState(&mapping, &owner);
+    const char* boundTo = owner.empty() ? "an unidentified object" : owner.c_str();
+
+    switch (state) {
+        case OverlayHookState::Active:
+            printf("[Linux Overlay] Steam overlay hook ACTIVE: glXSwapBuffers -> %s\n", boundTo);
+            break;
+        case OverlayHookState::MappedNotInterposing:
+            printf("[Linux Overlay] WARNING: gameoverlayrenderer.so is mapped but NOT interposing "
+                   "— glXSwapBuffers binds to %s. It reached this process too late to enter the "
+                   "global symbol scope ahead of libGL; only LD_PRELOAD at exec can do that. The "
+                   "overlay will not draw.\n", boundTo);
+            printf("[Linux Overlay]   mapping: %s\n", mapping.c_str());
+            break;
+        case OverlayHookState::NotPresent:
+            printf("[Linux Overlay] WARNING: gameoverlayrenderer.so is not loaded — this process "
+                   "was not launched by Steam with the overlay enabled. The overlay will not "
+                   "draw.\n");
+            break;
+    }
+    fflush(stdout);
+    return state;
+}
+
+// Linux OpenGL/GLX Overlay Window — glXSwapBuffers is hooked by gameoverlayrenderer.so
 class LinuxOverlayWindow {
 public:
     Display* display = nullptr;
@@ -168,7 +267,7 @@ public:
         colormap = XCreateColormap(display, root, visualInfo->visual, AllocNone);
         
         // Receive ALL input — we forward keyboard/mouse to Electron via XSendEvent.
-        // The window must hold X11 keyboard focus for gameoverlayrenderer64.so to
+        // The window must hold X11 keyboard focus for gameoverlayrenderer.so to
         // intercept Shift+Tab and trigger the Steam overlay.
         XSetWindowAttributes attrs;
         attrs.colormap = colormap;
@@ -256,29 +355,8 @@ public:
         XChangeProperty(display, window, wmProtocols, XA_ATOM, 32, PropModeReplace,
                        (unsigned char*)&wmTakeFocus, 1);
 
-        // Verify gameoverlayrenderer64.so is LD_PRELOADed (hook must be active)
-        {
-            FILE* maps = fopen("/proc/self/maps", "r");
-            if (maps) {
-                char line[512];
-                bool found = false;
-                while (fgets(line, sizeof(line), maps)) {
-                    if (strstr(line, "gameoverlayrenderer64")) {
-                        // Trim newline for clean log
-                        char* nl = strchr(line, '\n'); if (nl) *nl = 0;
-                        printf("[Linux Overlay] gameoverlayrenderer64.so LOADED: %s\n", line);
-                        fflush(stdout);
-                        found = true;
-                        break;
-                    }
-                }
-                fclose(maps);
-                if (!found) {
-                    printf("[Linux Overlay] WARNING: gameoverlayrenderer64.so NOT in /proc/self/maps — overlay hook inactive!\n");
-                    fflush(stdout);
-                }
-            }
-        }
+        // Presence is not interposition — reportOverlayHookState() tells the two apart.
+        reportOverlayHookState();
 
         OverlayLog("Input forwarding mode: all events forwarded to Electron via XSendEvent");
         
@@ -848,6 +926,20 @@ static napi_value ShouldSuppressNextBlur(napi_env env, napi_callback_info info) 
     return result;
 }
 
+// Expose the hook state to JavaScript. Callers currently have no way to tell
+// "the overlay is attached and will draw" from "the overlay is attached and
+// will silently do nothing", because attachOverlay() reports success either
+// way. Returns "active", "mapped-not-interposing" or "not-present".
+static napi_value GetOverlayHookState(napi_env env, napi_callback_info info) {
+    std::string mapping, owner;
+    const OverlayHookState state = queryOverlayHookState(&mapping, &owner);
+    const char* name = overlayHookStateName(state);
+
+    napi_value result;
+    napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
 // Module initialization - use same function names as other platforms for compatibility
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
@@ -861,6 +953,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "setSteamGameAtomOnWindow",  nullptr, SetSteamGameAtomOnWindow,  nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setElectronWindow",          nullptr, SetElectronWindow,          nullptr, nullptr, nullptr, napi_default, nullptr },
         { "shouldSuppressNextBlur",     nullptr, ShouldSuppressNextBlur,     nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "getOverlayHookState",        nullptr, GetOverlayHookState,        nullptr, nullptr, nullptr, napi_default, nullptr },
     };
     
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
