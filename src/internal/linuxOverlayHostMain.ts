@@ -138,7 +138,12 @@ function main(): void {
       }
     }, interval);
 
-    writeStamp({ ok: true, window: String(window), transparent, hookState });
+    // Deliberately not reporting the handle itself. createOverlayWindow returns
+    // a null-prototype object, so String() and template interpolation both throw
+    // "Cannot convert object to primitive value" -- and JSON.stringify quietly
+    // returns {}, which is why that is easy to miss. The parent only ever needed
+    // to know that a window exists.
+    writeStamp({ ok: true, transparent, hookState });
   };
 
   const handle = (line: string) => {
@@ -150,7 +155,17 @@ function main(): void {
     }
     switch (cmd.op) {
       case "create":
-        create(cmd as CreateCommand);
+        try {
+          create(cmd as CreateCommand);
+        } catch (e) {
+          // Fail loudly and immediately. Without this the host stays alive
+          // holding a window it never reported, and the parent waits out its
+          // whole deadline before falling back -- a five second stall followed
+          // by a silent wrong answer.
+          writeStamp({ ok: false, error: String(e) });
+          destroy();
+          process.exit(1);
+        }
         break;
       case "show":
         if (window) addon.showOverlayWindow(window);

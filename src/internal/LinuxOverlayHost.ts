@@ -66,7 +66,6 @@ interface Handshake {
   transparent?: boolean;
   /** "active" | "mapped-not-interposing" | "not-present" */
   hookState?: string;
-  window?: string;
   error?: string;
 }
 
@@ -198,6 +197,24 @@ export class LinuxOverlayHost {
     return this.child !== null && this.child.exitCode === null;
   }
 
+  /**
+   * Whether the child is still alive, asked of the kernel rather than of Node.
+   *
+   * The 'exit' event cannot answer this during the startup handshake: that event
+   * is delivered on the event loop, and the handshake deliberately blocks it. A
+   * signal-0 kill is the only liveness check available while we are not yielding.
+   */
+  private childAlive(): boolean {
+    const pid = this.child?.pid;
+    if (!pid) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Whether the host's window is genuinely transparent. False until the handshake lands. */
   get transparent(): boolean {
     return this.handshake?.transparent === true;
@@ -216,7 +233,7 @@ export class LinuxOverlayHost {
    * being meaningful immediately afterwards. The wait is bounded and happens
    * once, at attach time.
    */
-  start(options: LinuxOverlayHostOptions, timeoutMs = 5000): boolean {
+  start(options: LinuxOverlayHostOptions, timeoutMs = 3000): boolean {
     const library = findOverlayLibrary();
     if (!library) {
       SteamLogger.debug(
@@ -269,7 +286,10 @@ export class LinuxOverlayHost {
 
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (!this.running) break;
+      // Give up the moment the child dies rather than waiting out the deadline:
+      // the failure path is what users hit, and a five second frozen window
+      // followed by a silent fallback is the worst of both.
+      if (!this.childAlive()) break;
       const result = this.readStamp();
       if (result) {
         this.handshake = result;
@@ -287,8 +307,8 @@ export class LinuxOverlayHost {
     }
 
     SteamLogger.debug(
-      `[Steam Overlay] Overlay host ready (window=${this.handshake.window}, ` +
-        `transparent=${this.handshake.transparent}, hook=${this.handshake.hookState})`,
+      `[Steam Overlay] Overlay host ready (transparent=${this.handshake.transparent}, ` +
+        `hook=${this.handshake.hookState})`,
     );
     if (this.handshake.hookState !== "active") {
       SteamLogger.debug(

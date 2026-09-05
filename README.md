@@ -720,12 +720,12 @@ addon yourself. `node-gyp` compiles `native/linux-overlay.cpp` against X11 and
 GL headers that are not installed by default on a bare distribution:
 
 ```bash
-sudo apt-get install -y libx11-dev libxext-dev libxfixes-dev libgl1-mesa-dev
+sudo apt-get install -y libx11-dev libxext-dev libxfixes-dev libxcomposite-dev libgl1-mesa-dev
 ```
 
 Without them the build fails with `fatal error: X11/extensions/shape.h: No such
-file or directory` (or `Xfixes.h`), which is not obviously a missing-package
-problem the first time you hit it.
+file or directory` (or `Xfixes.h`, or `Xcomposite.h`), which is not obviously a
+missing-package problem the first time you hit it.
 
 ### Platform Support
 
