@@ -272,10 +272,21 @@ approximately 260 ms in practice, most of which is the child starting and
 creating its GL context. It is bounded, happens once, and is what makes
 `isTransparent()` meaningful the moment `addElectronSteamOverlay()` returns.
 
-**Set `SteamGameId` if you can.** The overlay attaches and responds to
-Shift+Tab without it, but Steam logs `Got gameid on commandline: 0` and draws
-only a partial overlay — the friends panel appears, the Game Overview and
-toolbar do not. `LD_PRELOAD` is the only variable actually required.
+**Set `SteamGameId`.** In principle only `LD_PRELOAD` is required — the overlay
+attaches and responds to Shift+Tab without it. In practice, without
+`SteamGameId` Steam draws only the friends panel: no dimming of the game behind
+it, no Game Overview, no toolbar. That reads as a broken overlay, not a degraded
+one, so treat it as required. The host warns when it is unset.
+
+Note the value does not reach the overlay as a command-line game id — Steam logs
+`Got gameid on commandline: 0` either way — so whatever it gates, it is not that.
+
+**When testing repeatedly, clean up between runs.** Steam runs a single
+`gameoverlayui` process bound to one pid. A previous overlay-attached process
+that has died but left its `/tmp/steam_chrome_overlay_uid<uid>_spid<pid>` socket
+behind will silently prevent the hotkey working for the live one, with no
+diagnostic anywhere. There is no error for this; the overlay simply stops
+responding.
 
 ## Electron Packaging
 

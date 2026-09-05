@@ -280,6 +280,20 @@ export class LinuxOverlayHost {
     );
     this.stampPath = stampPath;
 
+    // SteamGameId is inherited, not synthesized -- only the application knows
+    // its own id. Warn loudly when it is missing, because the failure is visual
+    // and confusing rather than absent: Steam draws the friends panel and
+    // nothing else, no dimming and no toolbar, which reads as a broken overlay
+    // rather than a missing environment variable.
+    if (!process.env["SteamGameId"]) {
+      SteamLogger.warn(
+        "[Steam Overlay] SteamGameId is not set. The overlay will attach and " +
+          "respond to Shift+Tab, but Steam will draw only a partial overlay — " +
+          "the friends panel, with no dimming, no Game Overview and no toolbar. " +
+          "Set SteamGameId to your app id before attaching.",
+      );
+    }
+
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
