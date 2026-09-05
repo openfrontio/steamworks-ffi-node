@@ -23,6 +23,7 @@ interface CreateCommand {
   fps: number;
   vsync: boolean;
   electronXid?: number;
+  debug?: boolean;
 }
 
 function loadNativeModule(explicitPath?: string): any {
@@ -97,6 +98,13 @@ function main(): void {
   };
 
   const create = (cmd: CreateCommand) => {
+    // Before createOverlayWindow, not after: the visual depth and GL renderer
+    // are logged during that call, and they are the two lines anyone debugging
+    // an overlay actually needs.
+    if (typeof addon.setDebugMode === "function") {
+      addon.setDebugMode(cmd.debug === true);
+    }
+
     window = addon.createOverlayWindow({
       width: cmd.width,
       height: cmd.height,

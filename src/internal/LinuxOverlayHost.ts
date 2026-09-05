@@ -58,6 +58,16 @@ export interface LinuxOverlayHostOptions {
   vsync: boolean;
   /** XID of the Electron window, for input forwarding. */
   electronXid?: number;
+  /**
+   * Debug logging state, sent with `create` rather than as a later command.
+   *
+   * It has to arrive with the create: the host applies it before building the
+   * window, and the most useful diagnostics -- the chosen visual depth, the GL
+   * renderer -- are logged during that call. A `setDebugMode` command sent
+   * afterwards is far too late, and one sent *before* attach never arrives at
+   * all, because the host does not exist yet.
+   */
+  debug?: boolean;
 }
 
 interface Handshake {
@@ -438,6 +448,10 @@ export function createHostedNativeModule(fallback: any): any {
         fps: options.fps,
         vsync: options.vsync,
         electronXid: options.electronXid,
+        // Carried into the create so the host starts with it. Configuring debug
+        // and then attaching is the natural order, and the order this library's
+        // own documentation uses, so it must work.
+        debug: SteamLogger.isDebugEnabled(),
       });
       return started ? HOSTED_WINDOW : null;
     },
