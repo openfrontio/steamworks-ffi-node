@@ -56,6 +56,8 @@ export class SteamOverlay {
   private nativeModule: any = null;
   /** The real addon, kept so the Linux host adapter is never wrapped twice. */
   private inProcessModule: any = null;
+  /** Debug state as requested through setDebugMode(); see the note there. */
+  private debugRequested = false;
   private isInitialized: boolean = false;
   private overlayWindow: any = null;
   /** Whether the overlay window is genuinely transparent -- see isTransparent(). */
@@ -124,6 +126,12 @@ export class SteamOverlay {
    * Call this when SteamLogger debug mode changes
    */
   setDebugMode(enabled: boolean): void {
+    // Remembered as well as forwarded. On Linux the overlay window lives in a
+    // host process that does not exist yet when this is typically called --
+    // configure, then attach -- and setDebugMode is a different switch from
+    // SteamLogger's, so the host cannot recover the state by asking the logger.
+    // Recording it here is what lets the create command carry it across.
+    this.debugRequested = enabled;
     if (this.nativeModule) {
       this.nativeModule.setDebugMode(enabled);
     }
@@ -243,6 +251,11 @@ export class SteamOverlay {
         electronXid: process.platform === "linux"
           ? Number(readWindowHandle(browserWindow) ?? 0) || undefined
           : undefined,
+        // Either switch turning debug on is meant to produce diagnostics, and
+        // the host has to be told at create time -- the visual depth and GL
+        // renderer are logged during window creation, before any later command
+        // could arrive.
+        debug: this.debugRequested || SteamLogger.isDebugEnabled(),
       };
 
       // On Linux, Steam's overlay only draws in a process that had
