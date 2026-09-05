@@ -42,7 +42,8 @@
             "-lX11",
             "-lXext",
             "-lXfixes",
-            "-lGL"
+            "-lGL",
+            "-ldl"
           ],
           "cflags_cc": [
             "-std=c++17",
