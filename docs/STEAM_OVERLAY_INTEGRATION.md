@@ -281,12 +281,23 @@ one, so treat it as required. The host warns when it is unset.
 Note the value does not reach the overlay as a command-line game id — Steam logs
 `Got gameid on commandline: 0` either way — so whatever it gates, it is not that.
 
-Debug logging set before `addElectronSteamOverlay()` is carried into the host
-with its create command, so the host starts with it on and the visual-depth and
-GL-renderer lines appear. Configure-then-attach is the natural order and the one
-this documentation uses, so it has to work; a `setDebugMode` call *after* attach
-is forwarded to the running host as a command, and also works, but arrives too
-late for anything logged during window creation.
+#### Turning on diagnostics
+
+**Use `overlay.setDebugMode(true)`.** That is the overlay's own switch, and it
+is the one to reach for. Call it before or after `addElectronSteamOverlay()` --
+before is the natural order and works: the flag travels with the host's create
+command, so the host starts with it on and the visual-depth and GL-renderer
+lines appear. Called after attach it is forwarded to the running host, which
+also works, but arrives too late for anything logged during window creation.
+
+There is a sharp edge here worth knowing about. `SteamOverlay.setDebugMode()`
+and `SteamLogger.setDebug()` are **two different switches on two different
+objects**, with confusingly similar names. Either will now enable the host's
+diagnostics, but they are not otherwise interchangeable: `setDebugMode` controls
+the overlay, `SteamLogger.setDebug` controls this library's logging generally.
+They are kept independent deliberately -- coupling them would mean enabling
+overlay diagnostics silently turned on everything else -- so pick the one whose
+scope you actually want.
 
 **When testing repeatedly, clean up between runs.** Steam runs a single
 `gameoverlayui` process bound to one pid. A previous overlay-attached process
