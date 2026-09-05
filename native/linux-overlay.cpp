@@ -144,6 +144,70 @@ static OverlayHookState reportOverlayHookState() {
     return state;
 }
 
+// Xlib's default error handler calls exit(). A library making X calls on behalf
+// of a host application must never let that happen: a bad window id should cost
+// the overlay, not the entire application.
+//
+// This is not hypothetical. getNativeWindowHandle() only returns an X window id
+// when Electron is running on X11; under Ozone/Wayland it decodes to something
+// else entirely (observed: 1). XChangeProperty on that raises BadWindow, and the
+// default handler terminates the process -- so on native Wayland the app dies
+// during overlay attach, before addElectronSteamOverlay() returns.
+static int overlayXErrorHandler(Display* dpy, XErrorEvent* error) {
+    char text[256];
+    text[0] = 0;
+    XGetErrorText(dpy, error->error_code, text, sizeof(text) - 1);
+    printf("[Linux Overlay] X error suppressed: %s (request %d.%d, resource 0x%lx)\n",
+           text, (int)error->request_code, (int)error->minor_code,
+           (unsigned long)error->resourceid);
+    fflush(stdout);
+    return 0;
+}
+
+// Installs the handler for the duration of our own X calls and restores whatever
+// was there before.
+//
+// Scope caveat, since it is wider than "our own calls" suggests: the handler is
+// process-global, so while it is installed an X error raised by any other thread
+// -- including the host application's own X usage -- is swallowed and merely
+// logged. That is the price of not permanently hijacking the host's handler,
+// which seems the worse trade; the window is kept as short as possible to bound
+// it. This file calls XInitThreads(), so the situation is real, not theoretical.
+//
+// Two details matter. The handler is process-global in Xlib, and the host
+// application may well have installed its own -- Chromium does -- so leaving
+// ours in place would silently take over its error handling. And X errors are
+// delivered asynchronously, when the reply is processed, so the XSync before
+// restoring is load-bearing: without it a pending error can arrive after the
+// previous handler is back and terminate the process anyway.
+class ScopedXErrorHandler {
+public:
+    explicit ScopedXErrorHandler(Display* dpy) : dpy_(dpy) {
+        previous_ = XSetErrorHandler(overlayXErrorHandler);
+    }
+    ~ScopedXErrorHandler() {
+        if (dpy_) XSync(dpy_, False);
+        XSetErrorHandler(previous_);
+    }
+    ScopedXErrorHandler(const ScopedXErrorHandler&) = delete;
+    ScopedXErrorHandler& operator=(const ScopedXErrorHandler&) = delete;
+private:
+    Display* dpy_;
+    XErrorHandler previous_;
+};
+
+// Whether an id actually names a window on this display.
+//
+// A non-zero check is not a validity test: the value Ozone/Wayland hands back
+// passes it and is not a window. Asking the server is the only way to know, and
+// it must be done with the error handler installed, since the query itself
+// raises BadWindow when the answer is no.
+static bool isValidXWindow(Display* dpy, Window window) {
+    if (!dpy || window == 0) return false;
+    XWindowAttributes attrs;
+    return XGetWindowAttributes(dpy, window, &attrs) != 0;
+}
+
 // Linux OpenGL/GLX Overlay Window — glXSwapBuffers is hooked by gameoverlayrenderer.so
 class LinuxOverlayWindow {
 public:
@@ -990,16 +1054,36 @@ static napi_value SetSteamGameAtomOnWindow(napi_env env, napi_callback_info info
         napi_value result; napi_get_boolean(env, false, &result); return result;
     }
     
-    uint32_t appIdInt = (uint32_t)appId;
-    Atom steamGameAtom = XInternAtom(dpy, "STEAM_GAME", False);
-    XChangeProperty(dpy, (Window)xWindowId, steamGameAtom, XA_CARDINAL, 32,
-                   PropModeReplace, (unsigned char*)&appIdInt, 1);
-    XFlush(dpy);
+    bool tagged = false;
+    {
+        // The guard XSyncs the display when it is destroyed, so it must not
+        // outlive it. An inner scope ends the guard while dpy is still open and
+        // the display is closed afterwards -- and there is a single exit path,
+        // so no return can outrun the close.
+        ScopedXErrorHandler errorGuard(dpy);
+
+        if (!isValidXWindow(dpy, (Window)xWindowId)) {
+            // Expected when the application is on native Wayland rather than
+            // XWayland: the handle is not an X window id at all. Skip the atom
+            // rather than writing to an arbitrary resource.
+            OverlayLogError("0x%lx is not a valid X window — not setting STEAM_GAME. "
+                            "This is expected on native Wayland; run Electron on X11 "
+                            "or XWayland for the Steam overlay.",
+                            (unsigned long)xWindowId);
+        } else {
+            uint32_t appIdInt = (uint32_t)appId;
+            Atom steamGameAtom = XInternAtom(dpy, "STEAM_GAME", False);
+            XChangeProperty(dpy, (Window)xWindowId, steamGameAtom, XA_CARDINAL, 32,
+                           PropModeReplace, (unsigned char*)&appIdInt, 1);
+            XFlush(dpy);
+            OverlayLog("Set STEAM_GAME=%u on Electron window 0x%lx", appIdInt,
+                       (unsigned long)xWindowId);
+            tagged = true;
+        }
+    }
     XCloseDisplay(dpy);
-    
-    OverlayLog("Set STEAM_GAME=%u on Electron window 0x%lx", appIdInt, (unsigned long)xWindowId);
-    
-    napi_value result; napi_get_boolean(env, true, &result); return result;
+
+    napi_value result; napi_get_boolean(env, tagged, &result); return result;
 }
 
 // setElectronWindow(handle, xid) — stores the Electron XID on the overlay for input forwarding
@@ -1014,7 +1098,16 @@ static napi_value SetElectronWindow(napi_env env, napi_callback_info info) {
     int64_t xid = 0;
     napi_get_value_int64(env, args[1], &xid);
     
-    if (window && xid) {
+    if (window && xid && window->display) {
+        // Validate before storing: this id is used for XSendEvent on every
+        // frame, so a bad one would raise errors from the render loop rather
+        // than from here, where they are far harder to attribute.
+        ScopedXErrorHandler errorGuard(window->display);
+        if (!isValidXWindow(window->display, (Window)xid)) {
+            OverlayLogError("0x%lx is not a valid X window — input will not be "
+                            "forwarded to the application.", (unsigned long)xid);
+            napi_value result; napi_get_boolean(env, false, &result); return result;
+        }
         window->electronWindow = (Window)xid;
         OverlayLog("Stored Electron window 0x%lx for input forwarding", (unsigned long)xid);
     }
