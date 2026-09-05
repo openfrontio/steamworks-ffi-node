@@ -337,9 +337,16 @@ export class LinuxOverlayHost {
     //
     // A dropped command is expected here -- the overlay is optional and the
     // host may die at any point -- so the correct handling is to note it and
-    // carry on. The try/catch in send() cannot do this job: EPIPE on a pipe is
-    // delivered asynchronously as an 'error' event, long after write()
-    // returned, so there is nothing for a synchronous catch to catch.
+    // carry on.
+    //
+    // This is the third defect in this file caused by the startup handshake
+    // blocking the event loop, and it is worth distinguishing from the other
+    // two. `exitCode` and `stdin.destroyed` give a *stale* answer: the truth
+    // would have arrived on the loop. EPIPE is a different failure -- the
+    // write appears to succeed and the failure is delivered later through a
+    // channel nothing was listening on, so no amount of waiting or re-checking
+    // would have found it. A synchronous try/catch around write() cannot see
+    // it either. Only a listener can.
     this.child.on("error", (err) => {
       SteamLogger.debug(`[Steam Overlay] Overlay host process error: ${err}`);
     });
