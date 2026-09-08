@@ -220,6 +220,31 @@ public:
     
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         switch (msg) {
+            case WM_MOUSEACTIVATE: {
+                // Hand activation to the game window.
+                //
+                // WS_EX_NOACTIVATE told Windows not to change activation when
+                // this window was clicked, and nothing then passed that decision
+                // on to the owner -- so clicking the game content left focus
+                // wherever it already was, and the player could not type. The
+                // title bar still worked, because the overlay covers the content
+                // area only, which is what made this look like a focus bug rather
+                // than an overlay one.
+                //
+                // HTTRANSPARENT below is not enough on its own: it routes the
+                // mouse *message* to the window beneath, but the activation
+                // decision is made against the window the hit test landed on.
+                // Verified by parking this window off-screen, which fixed the
+                // focus and removed the overlay -- so the window is both
+                // necessary and the cause. WS_EX_TRANSPARENT alone did not fix
+                // it, which is what ruled out hit-testing as the explanation.
+                //
+                // With no owner, this still declines activation, matching the
+                // previous behaviour of the style it replaces.
+                HWND owner = GetWindow(hwnd, GW_OWNER);
+                if (owner) SetForegroundWindow(owner);
+                return MA_NOACTIVATE;
+            }
             case WM_NCHITTEST:
                 // Return HTTRANSPARENT to make clicks pass through to window behind
                 return HTTRANSPARENT;
@@ -262,7 +287,7 @@ public:
         // Note: Don't use WS_EX_LAYERED - it's incompatible with OpenGL rendering
         // Only fall back to TOPMOST when there is no owner to sit above.
         hwnd = CreateWindowEx(
-            (owner ? 0 : WS_EX_TOPMOST) | WS_EX_NOACTIVATE |
+            (owner ? 0 : WS_EX_TOPMOST) |
                 (wantTransparent ? WS_EX_NOREDIRECTIONBITMAP : 0),
             "SteamOverlayWindowGL",
             title,
