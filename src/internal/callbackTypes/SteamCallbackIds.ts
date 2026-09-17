@@ -103,3 +103,6 @@ export const K_I_MICRO_TXN_AUTHORIZATION_RESPONSE = 152; // k_iSteamUserCallback
 
 /** Callback for GetTicketForWebApiResponse_t */
 export const K_I_GET_TICKET_FOR_WEB_API_RESPONSE = 168; // k_iSteamUserCallbacks + 68
+
+/** Callback for NewUrlLaunchParameters_t */
+export const K_I_NEW_URL_LAUNCH_PARAMETERS = 1014; // k_iSteamAppsCallbacks + 14

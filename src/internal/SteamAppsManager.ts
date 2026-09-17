@@ -14,7 +14,8 @@
  */
 
 import * as koffi from 'koffi';
-import { SteamLibraryLoader } from './SteamLibraryLoader';
+import { SteamLibraryLoader, CCallbackBase, FnCallbackRunPtr, FnCallbackRunResultPtr, FnGetCallbackSizeBytesPtr } from './SteamLibraryLoader';
+import { K_I_NEW_URL_LAUNCH_PARAMETERS } from './callbackTypes/SteamCallbackIds';
 import { SteamAPICore } from './SteamAPICore';
 import { SteamLogger } from './SteamLogger';
 import type {
@@ -34,6 +35,12 @@ import type {
 export class SteamAppsManager {
   private libraryLoader: SteamLibraryLoader;
   private apiCore: SteamAPICore;
+
+  private newUrlLaunchCallbackObject: any = null;
+  private newUrlLaunchCallbackRegistered: boolean = false;
+  private newUrlLaunchVTable: any = null; // Keep vtable alive
+  private newUrlLaunchCallbackFunctions: any[] = []; // Keep registered functions alive
+  private newUrlLaunchHandlers: (() => void)[] = [];
 
   constructor(libraryLoader: SteamLibraryLoader, apiCore: SteamAPICore) {
     this.libraryLoader = libraryLoader;
@@ -1029,6 +1036,118 @@ export class SteamAppsManager {
       SteamLogger.error('[Steamworks] Error getting launch command line:', error);
       return '';
     }
+  }
+
+  /**
+   * Register a push-callback handler for NewUrlLaunchParameters_t
+   *
+   * Same low-level koffi.register + SteamAPI_RegisterCallback pattern as
+   * SteamMatchmakingManager's GameLobbyJoinRequested_t: this is an unprompted
+   * callback, not the result of an API call this process made.
+   */
+  private registerNewUrlLaunchParametersCallback(): void {
+    if (this.newUrlLaunchCallbackRegistered) return;
+
+    try {
+      // The struct carries no fields, so pvParam is never read: the callback
+      // is only a signal to re-query getLaunchCommandLine/getLaunchQueryParam.
+      const dispatch = (where: string) => {
+        for (const handler of [...this.newUrlLaunchHandlers]) {
+          try {
+            handler();
+          } catch (error) {
+            SteamLogger.error(`[Steamworks] Error in NewUrlLaunchParameters handler (${where}):`, error);
+          }
+        }
+      };
+
+      // Run(void* pvParam) -- used on macOS/Linux
+      const runCallback = (_selfPtr: any, _pvParam: any) => dispatch('Run');
+
+      // Run(void* pvParam, bool bIOFailure, uint64 hSteamAPICall) -- Steam
+      // dispatches non-call-result callbacks like this one via Run() on
+      // macOS/Linux, but via this RunResult-shaped slot on Windows.
+      const runCallbackResult = (_selfPtr: any, _pvParam: any, _bIOFailure: boolean, _hSteamAPICall: bigint) =>
+        dispatch('RunResult');
+
+      // sizeof an empty C++ struct is 1, not 0.
+      const getCallbackSizeBytes = (_selfPtr: any): number => 1;
+
+      this.newUrlLaunchCallbackFunctions = [
+        koffi.register(runCallback, FnCallbackRunPtr),
+        koffi.register(runCallbackResult, FnCallbackRunResultPtr),
+        koffi.register(getCallbackSizeBytes, FnGetCallbackSizeBytesPtr),
+      ];
+
+      this.newUrlLaunchVTable = koffi.alloc('void*', 3);
+      koffi.encode(this.newUrlLaunchVTable, koffi.array('void*', 3), this.newUrlLaunchCallbackFunctions);
+
+      this.newUrlLaunchCallbackObject = koffi.alloc(CCallbackBase, 1);
+      koffi.encode(this.newUrlLaunchCallbackObject, CCallbackBase, {
+        vfptr: this.newUrlLaunchVTable,
+        m_nCallbackFlags: 0,
+        _pad: [0, 0, 0],
+        m_iCallback: K_I_NEW_URL_LAUNCH_PARAMETERS,
+      });
+
+      this.libraryLoader.SteamAPI_RegisterCallback(
+        this.newUrlLaunchCallbackObject,
+        K_I_NEW_URL_LAUNCH_PARAMETERS
+      );
+
+      this.newUrlLaunchCallbackRegistered = true;
+    } catch (error) {
+      SteamLogger.error('[Steamworks] Failed to register NewUrlLaunchParameters callback:', error);
+    }
+  }
+
+  /**
+   * Subscribe to a Steam URL being executed while the game is already running
+   *
+   * Steam does not start a second process for
+   * `steam://run/<appid>//<command line>/?param=value` when the game is
+   * running; it raises this instead. The event carries nothing: read the new
+   * values with `getLaunchCommandLine()` and `getLaunchQueryParam()`.
+   *
+   * @param handler - Called when new launch parameters are available
+   * @returns An unsubscribe function
+   *
+   * Steamworks SDK Callback:
+   * - `NewUrlLaunchParameters_t` (k_iSteamAppsCallbacks + 14)
+   */
+  onNewUrlLaunchParameters(handler: () => void): () => void {
+    this.registerNewUrlLaunchParametersCallback();
+    this.newUrlLaunchHandlers.push(handler);
+    return () => {
+      const index = this.newUrlLaunchHandlers.indexOf(handler);
+      if (index > -1) {
+        this.newUrlLaunchHandlers.splice(index, 1);
+      }
+    };
+  }
+
+  /**
+   * Unregister the NewUrlLaunchParameters_t callback
+   *
+   * Called during SteamworksSDK.shutdown(), before SteamAPI_Shutdown() and
+   * before koffi.reset(), so Steam doesn't fire this callback into a freed
+   * koffi function pointer.
+   */
+  cleanup(): void {
+    if (this.newUrlLaunchCallbackObject) {
+      this.libraryLoader.SteamAPI_UnregisterCallback(this.newUrlLaunchCallbackObject);
+
+      for (const func of this.newUrlLaunchCallbackFunctions) {
+        if (func) {
+          koffi.unregister(func);
+        }
+      }
+    }
+    this.newUrlLaunchCallbackRegistered = false;
+    this.newUrlLaunchCallbackObject = null;
+    this.newUrlLaunchVTable = null;
+    this.newUrlLaunchCallbackFunctions = [];
+    this.newUrlLaunchHandlers = [];
   }
 
   // ========================================
