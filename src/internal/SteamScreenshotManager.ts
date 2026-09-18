@@ -374,6 +374,8 @@ export class SteamScreenshotManager {
    *
    * @param handler - Called on each screenshot request
    * @returns An unsubscribe function
+   * @throws If Steam refused the callback registration, so the caller does
+   *   not go on to hookScreenshots(true) with nobody listening
    *
    * @example Supply the screenshot yourself
    * ```typescript
@@ -389,6 +391,13 @@ export class SteamScreenshotManager {
    */
   onScreenshotRequested(handler: () => void): () => void {
     this.registerScreenshotRequestedCallback();
+    // Unlike the other push callbacks this one is only useful alongside
+    // hookScreenshots(true), which makes Steam stop capturing. A caller that
+    // hooks on the strength of a silently failed registration loses every
+    // screenshot, so the failure is thrown rather than logged.
+    if (!this.screenshotRequestedCallbackRegistered) {
+      throw new Error('ScreenshotRequested_t callback could not be registered');
+    }
     this.screenshotRequestedHandlers.push(handler);
     return () => {
       const index = this.screenshotRequestedHandlers.indexOf(handler);

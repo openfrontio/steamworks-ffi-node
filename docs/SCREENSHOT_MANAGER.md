@@ -245,6 +245,7 @@ const unsubscribe = steam.screenshots.onScreenshotRequested(() => {
 
 **Notes:**
 - Only fires after `hookScreenshots(true)`; with hooking off, Steam captures the frame itself and this never fires
+- Throws if the callback could not be registered, so you never call `hookScreenshots(true)` with nobody listening
 - Runs from `runCallbacks()`, like every other Steam callback
 - Unregistered automatically in `shutdown()`
 
