@@ -106,3 +106,6 @@ export const K_I_GET_TICKET_FOR_WEB_API_RESPONSE = 168; // k_iSteamUserCallbacks
 
 /** Callback for NewUrlLaunchParameters_t */
 export const K_I_NEW_URL_LAUNCH_PARAMETERS = 1014; // k_iSteamAppsCallbacks + 14
+
+/** Callback for ScreenshotRequested_t */
+export const K_I_SCREENSHOT_REQUESTED = 2301; // k_iSteamScreenshotsCallbacks + 1

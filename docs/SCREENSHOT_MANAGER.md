@@ -16,9 +16,10 @@ Screenshots can be captured in two ways:
 |----------|-----------|-------------|
 | [Screenshot Capture](#screenshot-capture) | 3 | Add screenshots from files or raw data |
 | [Screenshot Hooking](#screenshot-hooking) | 3 | Control screenshot handling |
+| [Screenshot Callbacks](#screenshot-callbacks) | 1 | React to the screenshot hotkey |
 | [Screenshot Tagging](#screenshot-tagging) | 3 | Tag screenshots with metadata |
 
-**Total: 9 Functions**
+**Total: 10 Functions**
 
 ---
 
@@ -214,6 +215,38 @@ if (hooked) {
   console.log('Steam overlay handles screenshots');
 }
 ```
+
+---
+
+## Screenshot Callbacks
+
+### `onScreenshotRequested(handler)`
+
+Subscribes to the user pressing Steam's screenshot hotkey while screenshots are hooked.
+
+**Steamworks SDK Callback:**
+- `ScreenshotRequested_t` (k_iSteamScreenshotsCallbacks + 1)
+
+**Parameters:**
+- `handler: () => void` - Called on each request. The callback carries no data.
+
+**Returns:** `() => void` - An unsubscribe function
+
+**Example:**
+```typescript
+steam.screenshots.hookScreenshots(true);
+
+const unsubscribe = steam.screenshots.onScreenshotRequested(() => {
+  const { rgb, width, height } = myRenderer.captureScreenRGB();
+  const handle = steam.screenshots.writeScreenshot(rgb, width, height);
+  steam.screenshots.setLocation(handle, getCurrentMapName());
+});
+```
+
+**Notes:**
+- Only fires after `hookScreenshots(true)`; with hooking off, Steam captures the frame itself and this never fires
+- Runs from `runCallbacks()`, like every other Steam callback
+- Unregistered automatically in `shutdown()`
 
 ---
 
