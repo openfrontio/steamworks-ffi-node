@@ -788,11 +788,12 @@ class SteamworksSDK {
     // 3. Shutdown Steam Input before SteamAPI_Shutdown() (Steamworks requirement).
     this.input.shutdown();
 
-    // 4. Unregister the GameLobbyJoinRequested_t and NewUrlLaunchParameters_t
-    //    koffi callbacks.
+    // 4. Unregister the GameLobbyJoinRequested_t, NewUrlLaunchParameters_t
+    //    and ScreenshotRequested_t koffi callbacks.
     //    Same reasoning as step 5 — must happen before SteamAPI_Shutdown().
     this.matchmaking.cleanup();
     this.apps.cleanup();
+    this.screenshots.cleanup();
 
     // 5. Unregister Koffi callbacks and cancel active auth tickets.
     //    MUST happen before SteamAPI_Shutdown() so Steam doesn't fire callbacks

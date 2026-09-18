@@ -1,6 +1,8 @@
-import { SteamLibraryLoader } from './SteamLibraryLoader';
+import * as koffi from 'koffi';
+import { SteamLibraryLoader, CCallbackBase, FnCallbackRunPtr, FnCallbackRunResultPtr, FnGetCallbackSizeBytesPtr } from './SteamLibraryLoader';
 import { SteamAPICore } from './SteamAPICore';
 import { SteamLogger } from './SteamLogger';
+import { K_I_SCREENSHOT_REQUESTED } from './callbackTypes/SteamCallbackIds';
 import {
   ScreenshotHandle,
   EVRScreenshotType,
@@ -63,6 +65,13 @@ export class SteamScreenshotManager {
   
   /** Cached screenshots interface pointer */
   private screenshotsInterface: any = null;
+
+  // ScreenshotRequested_t push callback (see registerScreenshotRequestedCallback)
+  private screenshotRequestedCallbackObject: any = null;
+  private screenshotRequestedCallbackRegistered: boolean = false;
+  private screenshotRequestedVTable: any = null; // Keep vtable alive
+  private screenshotRequestedCallbackFunctions: any[] = []; // Keep registered functions alive
+  private screenshotRequestedHandlers: (() => void)[] = [];
 
   /**
    * Creates a new SteamScreenshotManager instance
@@ -291,6 +300,135 @@ export class SteamScreenshotManager {
     } catch (error) {
       SteamLogger.error('[Steamworks] Error hooking screenshots:', error);
     }
+  }
+
+  /**
+   * Register a push-callback handler for ScreenshotRequested_t
+   *
+   * Same low-level koffi.register + SteamAPI_RegisterCallback pattern as
+   * SteamAppsManager's NewUrlLaunchParameters_t: an unprompted callback with
+   * an empty struct, not the result of an API call this process made.
+   */
+  private registerScreenshotRequestedCallback(): void {
+    if (this.screenshotRequestedCallbackRegistered) return;
+
+    try {
+      // The struct carries no fields, so pvParam is never read.
+      const dispatch = (where: string) => {
+        for (const handler of [...this.screenshotRequestedHandlers]) {
+          try {
+            handler();
+          } catch (error) {
+            SteamLogger.error(`[Steamworks] Error in ScreenshotRequested handler (${where}):`, error);
+          }
+        }
+      };
+
+      // Run(void* pvParam) -- used on macOS/Linux
+      const runCallback = (_selfPtr: any, _pvParam: any) => dispatch('Run');
+
+      // Run(void* pvParam, bool bIOFailure, uint64 hSteamAPICall) -- Steam
+      // dispatches non-call-result callbacks like this one via Run() on
+      // macOS/Linux, but via this RunResult-shaped slot on Windows.
+      const runCallbackResult = (_selfPtr: any, _pvParam: any, _bIOFailure: boolean, _hSteamAPICall: bigint) =>
+        dispatch('RunResult');
+
+      // sizeof an empty C++ struct is 1, not 0.
+      const getCallbackSizeBytes = (_selfPtr: any): number => 1;
+
+      this.screenshotRequestedCallbackFunctions = [
+        koffi.register(runCallback, FnCallbackRunPtr),
+        koffi.register(runCallbackResult, FnCallbackRunResultPtr),
+        koffi.register(getCallbackSizeBytes, FnGetCallbackSizeBytesPtr),
+      ];
+
+      this.screenshotRequestedVTable = koffi.alloc('void*', 3);
+      koffi.encode(this.screenshotRequestedVTable, koffi.array('void*', 3), this.screenshotRequestedCallbackFunctions);
+
+      this.screenshotRequestedCallbackObject = koffi.alloc(CCallbackBase, 1);
+      koffi.encode(this.screenshotRequestedCallbackObject, CCallbackBase, {
+        vfptr: this.screenshotRequestedVTable,
+        m_nCallbackFlags: 0,
+        _pad: [0, 0, 0],
+        m_iCallback: K_I_SCREENSHOT_REQUESTED,
+      });
+
+      this.libraryLoader.SteamAPI_RegisterCallback(
+        this.screenshotRequestedCallbackObject,
+        K_I_SCREENSHOT_REQUESTED
+      );
+
+      this.screenshotRequestedCallbackRegistered = true;
+    } catch (error) {
+      SteamLogger.error('[Steamworks] Failed to register ScreenshotRequested callback:', error);
+    }
+  }
+
+  /**
+   * Subscribe to the user pressing Steam's screenshot hotkey while screenshots
+   * are hooked
+   *
+   * Only fires after `hookScreenshots(true)`. The event carries nothing: the
+   * game captures its own frame and hands it to `writeScreenshot()` or
+   * `addScreenshotToLibrary()`.
+   *
+   * @param handler - Called on each screenshot request
+   * @returns An unsubscribe function
+   * @throws If Steam refused the callback registration, so the caller does
+   *   not go on to hookScreenshots(true) with nobody listening
+   *
+   * @example Supply the screenshot yourself
+   * ```typescript
+   * steam.screenshots.hookScreenshots(true);
+   * const unsubscribe = steam.screenshots.onScreenshotRequested(() => {
+   *   const { rgb, width, height } = myRenderer.captureScreenRGB();
+   *   steam.screenshots.writeScreenshot(rgb, width, height);
+   * });
+   * ```
+   *
+   * Steamworks SDK Callback:
+   * - `ScreenshotRequested_t` (k_iSteamScreenshotsCallbacks + 1)
+   */
+  onScreenshotRequested(handler: () => void): () => void {
+    this.registerScreenshotRequestedCallback();
+    // Unlike the other push callbacks this one is only useful alongside
+    // hookScreenshots(true), which makes Steam stop capturing. A caller that
+    // hooks on the strength of a silently failed registration loses every
+    // screenshot, so the failure is thrown rather than logged.
+    if (!this.screenshotRequestedCallbackRegistered) {
+      throw new Error('ScreenshotRequested_t callback could not be registered');
+    }
+    this.screenshotRequestedHandlers.push(handler);
+    return () => {
+      const index = this.screenshotRequestedHandlers.indexOf(handler);
+      if (index > -1) {
+        this.screenshotRequestedHandlers.splice(index, 1);
+      }
+    };
+  }
+
+  /**
+   * Unregister the ScreenshotRequested_t callback
+   *
+   * Called during SteamworksSDK.shutdown(), before SteamAPI_Shutdown() and
+   * before koffi.reset(), so Steam doesn't fire this callback into a freed
+   * koffi function pointer.
+   */
+  cleanup(): void {
+    if (this.screenshotRequestedCallbackObject) {
+      this.libraryLoader.SteamAPI_UnregisterCallback(this.screenshotRequestedCallbackObject);
+
+      for (const func of this.screenshotRequestedCallbackFunctions) {
+        if (func) {
+          koffi.unregister(func);
+        }
+      }
+    }
+    this.screenshotRequestedCallbackRegistered = false;
+    this.screenshotRequestedCallbackObject = null;
+    this.screenshotRequestedVTable = null;
+    this.screenshotRequestedCallbackFunctions = [];
+    this.screenshotRequestedHandlers = [];
   }
 
   /**
