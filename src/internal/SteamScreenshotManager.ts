@@ -387,7 +387,7 @@ export class SteamScreenshotManager {
    * ```
    *
    * Steamworks SDK Callback:
-   * - `ScreenshotRequested_t` (k_iSteamScreenshotsCallbacks + 1)
+   * - `ScreenshotRequested_t` (k_iSteamScreenshotsCallbacks + 2)
    */
   onScreenshotRequested(handler: () => void): () => void {
     this.registerScreenshotRequestedCallback();

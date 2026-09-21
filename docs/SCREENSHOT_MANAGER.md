@@ -225,7 +225,7 @@ if (hooked) {
 Subscribes to the user pressing Steam's screenshot hotkey while screenshots are hooked.
 
 **Steamworks SDK Callback:**
-- `ScreenshotRequested_t` (k_iSteamScreenshotsCallbacks + 1)
+- `ScreenshotRequested_t` (k_iSteamScreenshotsCallbacks + 2)
 
 **Parameters:**
 - `handler: () => void` - Called on each request. The callback carries no data.
